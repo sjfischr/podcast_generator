@@ -16,9 +16,10 @@ separate dialogue batches and are rendered as silence placeholders so you
 can overdub real music / SFX in your DAW.
 
 v3 Audio-tag support (embed directly in speaker lines):
-    [laughing]   [whispering]   [sighing]   [groaning]
-    [cheerfully] [cautiously]   [elated]    [sad]
-    [applause]   [gentle footsteps]          etc.
+    [laughs]       [laughs harder]  [starts laughing]  [wheezing]
+    [whispers]     [sighs]          [exhales]          [snorts]
+    [excited]      [curious]        [sarcastic]        [mischievously]
+    [crying]       [woo]            [sings]            etc.
 
 Requirements:
     pip install "elevenlabs>=1.50.0" pydub python-dotenv
@@ -103,6 +104,7 @@ CONFIG = {
     "SCRIPT_PATH": "podcast_script.md",
     "OUTPUT_DIR": "audio_segments",    # cached batch MP3s land here
     "FINAL_OUTPUT": "episode.mp3",
+    "INTRO_STING_PATH": "intro_sting.mp3",  # inserted at [MUSIC_INTRO]; set to "" to disable
 
     # Retry / rate-limit handling
     "MAX_RETRIES": 3,
@@ -320,22 +322,39 @@ def load_mp3_bytes(data: bytes) -> AudioSegment:
     return AudioSegment.from_file(io.BytesIO(data), format="mp3")
 
 
-def direction_to_silence(tag: str) -> AudioSegment:
-    """Convert a direction tag string to a silence AudioSegment."""
+def direction_to_audio(
+    tag: str,
+    intro_sting: "AudioSegment | None" = None,
+) -> AudioSegment:
+    """Convert a direction tag string to an AudioSegment.
+
+    [MUSIC_INTRO] uses the loaded intro sting (if available), otherwise falls
+    back to a silence placeholder.  All other music/pause tags produce silence.
+    """
     tag_upper = tag.upper()
-    if "MUSIC" in tag_upper:
+    if tag_upper == "MUSIC_INTRO":
+        if intro_sting is not None:
+            print(f"    [MUSIC_INTRO] — inserting intro sting ({len(intro_sting) / 1000:.1f}s)")
+            return intro_sting
+        ms = CONFIG["MUSIC_PLACEHOLDER_MS"]
+        print(f"    [MUSIC_INTRO] — no sting found, using {ms}ms silence placeholder")
+        return silence(ms)
+    elif "MUSIC" in tag_upper:
         ms = CONFIG["MUSIC_PLACEHOLDER_MS"]
         print(f"    [{tag}] — {ms}ms silence placeholder (overdub music in DAW)")
+        return silence(ms)
     elif tag_upper == "PAUSE_LONG":
         ms = CONFIG["PAUSE_LONG_MS"]
         print(f"    [{tag}] — {ms}ms pause")
+        return silence(ms)
     elif tag_upper == "PAUSE_SHORT":
         ms = CONFIG["PAUSE_SHORT_MS"]
         print(f"    [{tag}] — {ms}ms pause")
+        return silence(ms)
     else:
         ms = CONFIG["PAUSE_SHORT_MS"]
         print(f"    [{tag}] — unknown direction tag, using {ms}ms silence")
-    return silence(ms)
+        return silence(ms)
 
 
 def batch_cache_path(seg_dir: Path, batch: DialogueBatch) -> Path:
@@ -350,7 +369,12 @@ def batch_cache_path(seg_dir: Path, batch: DialogueBatch) -> Path:
 # Main
 # ---------------------------------------------------------------------------
 
-def main(script_path: str, output_path: str, tts_mode: bool = False) -> None:
+def main(
+    script_path: str,
+    output_path: str,
+    tts_mode: bool = False,
+    intro_sting_path: str = "",
+) -> None:
     api_key = os.getenv("ELEVENLABS_API_KEY")
     if not api_key:
         print("ERROR: ELEVENLABS_API_KEY not set. Export it or add it to a .env file.")
@@ -358,10 +382,19 @@ def main(script_path: str, output_path: str, tts_mode: bool = False) -> None:
 
     client = ElevenLabs(api_key=api_key)
 
+    # Load intro sting (used at [MUSIC_INTRO])
+    intro_sting: AudioSegment | None = None
+    sting_path = Path(intro_sting_path or CONFIG["INTRO_STING_PATH"])
+    if sting_path.exists():
+        intro_sting = AudioSegment.from_mp3(str(sting_path))
+        print(f"Intro sting    : {sting_path} ({len(intro_sting) / 1000:.1f}s)")  # type: ignore[arg-type]
+    else:
+        print(f"Intro sting    : not found at '{sting_path}' — [MUSIC_INTRO] will be silent")
+
     mode_label = "TTS per-turn (--tts-mode)" if tts_mode else "Text to Dialogue API"
-    print(f"\nModel  : {CONFIG['MODEL_ID']}")
-    print(f"Mode   : {mode_label}")
-    print(f"Format : {CONFIG['OUTPUT_FORMAT']}")
+    print(f"Model          : {CONFIG['MODEL_ID']}")
+    print(f"Mode           : {mode_label}")
+    print(f"Format         : {CONFIG['OUTPUT_FORMAT']}")
     print(f"\nParsing script: {script_path}")
 
     turns = parse_script(script_path)
@@ -395,7 +428,7 @@ def main(script_path: str, output_path: str, tts_mode: bool = False) -> None:
 
         # ── Direction tag ─────────────────────────────────────────────────
         if isinstance(item, Turn) and item.kind == "DIRECTION":
-            segments.append(direction_to_silence(item.text))
+            segments.append(direction_to_audio(item.text, intro_sting=intro_sting))
             continue
 
         # ── Dialogue batch (default mode) ─────────────────────────────────
@@ -504,6 +537,16 @@ if __name__ == "__main__":
             "instead of the Text to Dialogue API."
         ),
     )
+    parser.add_argument(
+        "--intro-sting",
+        default="",
+        metavar="FILE",
+        help=(
+            f"MP3 file to insert at [MUSIC_INTRO] "
+            f"(default: {CONFIG['INTRO_STING_PATH']}). "
+            "Pass --intro-sting='' to use silence placeholder instead."
+        ),
+    )
     args = parser.parse_args()
 
     if args.no_cache:
@@ -513,4 +556,4 @@ if __name__ == "__main__":
             shutil.rmtree(seg_dir)
             print(f"Cache cleared: {seg_dir}/")
 
-    main(args.script, args.output, tts_mode=args.tts_mode)
+    main(args.script, args.output, tts_mode=args.tts_mode, intro_sting_path=args.intro_sting)
